@@ -1,0 +1,1034 @@
+package model;
+
+import callback.Callback_Y_2I;
+import com.gurobi.gurobi.*;
+import elements.Client;
+import elements.Hub;
+import elements.Node;
+import elements.Vehicle;
+import instance.Instance;
+import main.Parameters;
+
+import java.io.*;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public class Model2ELRP_2I_pw {
+
+    private Instance inst;
+    private int tLim;
+    private boolean relax;
+    private GRBEnv env;
+    private boolean callback = false;
+    private GRBModel model;
+    private GRBVar[][][] xijk;
+    private GRBVar[][] ych;
+    private GRBVar[][] wch;
+
+    private GRBVar[][] qkh;
+
+    private GRBVar[][] sck;
+    private GRBVar[] lh;
+    private GRBVar[][][] zijk;
+
+    private GRBVar[] Fk;
+    private GRBVar[][] fke;
+    private GRBVar numStops;
+
+    private double cost;
+
+    private boolean hasSolution;
+    private int problemVersion;
+    private int statusOpt;
+
+
+    public Model2ELRP_2I_pw(Instance inst, int tLim, boolean relax)
+    {
+        this.inst = inst;
+        this.tLim= tLim;
+        this.relax = relax;
+
+        xijk = new GRBVar[inst.getNumNodes()][inst.getNumNodes()][inst.getNumVehicles()];
+        zijk = new GRBVar[inst.getNumNodes()][inst.getNumNodes()][inst.getNumVehicles()];
+        ych = new GRBVar[inst.getNumClients()][inst.getNumHubs()];
+        wch = new GRBVar[inst.getNumClients()][inst.getNumHubs()];
+        qkh = new GRBVar[inst.getNumVehicles()][inst.getNumHubs()];
+        sck = new GRBVar[inst.getNumClients()][inst.getNumVehicles()];
+        lh = new GRBVar[inst.getNumHubs()];
+        Fk = new GRBVar[inst.getNumVehicles()];
+        fke = new GRBVar[inst.getNumVehicles()][Parameters.INTERVALS];
+
+    }
+
+    public void buildModel(File solution) throws GRBException, IOException {
+
+        env = new GRBEnv();
+        setParameters();
+        model = new GRBModel(env);
+        addVariables();
+        model.update();
+        addObjective();
+        addConstraintsE1();
+        addConstraintsE2();
+        addConstraintsPW();
+        addSymmetryBreaking();
+        addValidInequalities();
+        model.update();
+    }
+
+    public void solve()
+    {
+        try
+        {
+            model.optimize();
+            if (model.get(GRB.IntAttr.SolCount) > 0)
+            {
+                hasSolution = true;
+            }
+            int status = model.get(GRB.IntAttr.Status);
+            if (status == GRB.Status.INFEASIBLE || status == GRB.Status.INF_OR_UNBD)
+            {
+                this.statusOpt = 2;
+                printIIS();
+            } else if (status == GRB.Status.TIME_LIMIT)
+            {
+                this.statusOpt = 1;
+                if (hasSolution)
+                    this.statusOpt = 4;
+            } else if (status == GRB.Status.OPTIMAL)
+                this.statusOpt = 0;
+            else if (status == GRB.Status.CUTOFF)
+                this.statusOpt = 3;
+        } catch (GRBException e)
+        {
+            e.printStackTrace();
+        }
+    }
+
+    private void printIIS() throws GRBException
+    {
+        // Compute IIS
+        System.out.println("The model is infeasible; computing IIS");
+        model.computeIIS();
+        System.out.println("\nThe following constraint(s) " + "cannot be satisfied:");
+        for (GRBConstr c : model.getConstrs())
+        {
+            if (c.get(GRB.IntAttr.IISConstr) == 1)
+            {
+                String constraint = c.get(GRB.StringAttr.ConstrName);
+                System.out.println(constraint);
+            }
+        }
+    }
+    private void setParameters() throws GRBException {
+        int threads = Runtime.getRuntime().availableProcessors();
+        env.set(GRB.IntParam.Threads, threads);
+        env.set(GRB.IntParam.Presolve, 1);
+        env.set(GRB.DoubleParam.OptimalityTol,1e-2);
+        env.set(GRB.IntParam.Method, 2);
+        env.set(GRB.IntParam.PreCrush, 1);
+        env.set(GRB.IntParam.NodeMethod, 1);
+        env.set(GRB.IntParam.MIPFocus, 2);
+        env.set(GRB.IntParam.Symmetry, 2);
+        env.set(GRB.DoubleParam.MIPGap, 0);
+        env.set(GRB.DoubleParam.Heuristics, 0.3);
+        env.set(GRB.IntParam.OutputFlag, 1);
+        env.set(GRB.IntParam.Cuts, 1);
+        env.set(GRB.DoubleParam.TimeLimit, tLim);
+    }
+
+    private void addVariables() throws GRBException {
+        for (Hub hub : inst.getHubs()) {
+            lh[hub.getId()] = model.addVar(0, 1, 0, relax ? GRB.CONTINUOUS : GRB.BINARY,
+                    "l_h_" + hub.getId());
+            for (Client client : inst.getClients()) {
+                ych[client.getId()][hub.getId()] = model.addVar(0, 1, 0, relax ? GRB.CONTINUOUS : GRB.BINARY,
+                        "y_c_h_" + client.getId() + "_" + hub.getId());
+                if (problemVersion != 2 && client.getAvailableHubs().contains(hub))
+                    wch[client.getId()][hub.getId()] = model.addVar(0, 1, 0, relax ? GRB.CONTINUOUS : GRB.BINARY,
+                            "w_c_h_" + client.getId() + "_" + hub.getId());
+            }
+            for(Vehicle vehicle: inst.getVehicles(2))
+            {
+                qkh[vehicle.getId()][hub.getId()] = model.addVar(0, 1, 0, relax ? GRB.CONTINUOUS : GRB.BINARY,
+                        "q_k_h_" +vehicle.getId()+"_"+ hub.getId());
+            }
+        }
+
+        for (Client client : inst.getClients()) {
+            for (Vehicle vehicle : inst.getVehicles()) {
+                if (vehicle.getEchelon() == 1)
+                    continue;
+                sck[client.getId()][vehicle.getId()] = model.addVar(0, 1, 0, relax ? GRB.CONTINUOUS : GRB.BINARY, "s_c_k_" + client.getId() + "_" + vehicle.getId());
+            }
+        }
+
+        //variables E1
+        for (Vehicle vehicle: inst.getVehicles(1))
+        {
+
+            for (int i = 0; i < inst.getNumNodes()-inst.getNumHubs()-inst.getNumClients()-1; i++) {
+                Node from = inst.getNodes().get(i);
+
+                for (int j = 1; j < inst.getNumNodes()-inst.getNumHubs()-inst.getNumClients()-1; j++) {
+                    Node to = inst.getNodes().get(j);
+                    if (from.equals(to))
+                        continue;
+
+                    xijk[from.getId()][to.getId()][vehicle.getId()] = model.addVar(0,1,0, relax ? GRB.CONTINUOUS : GRB.BINARY,
+                            "x_e_k_i_j_"+vehicle.getEchelon()+"_"+vehicle.getId()+"_"+from.getId()+"_"+to.getId());
+                    zijk[from.getId()][to.getId()][vehicle.getId()] = model.addVar(0, vehicle.getCapacity(),  0, GRB.CONTINUOUS,
+                            "z_e_k_i_j_"+vehicle.getEchelon()+"_"+vehicle.getId()+"_"+from.getId()+"_"+to.getId());
+
+                }
+                if (from.getType() == Parameters.NODE_HUB)
+                {
+                    int finaldepot = inst.getNumNodes()-1;
+                    xijk[from.getId()][finaldepot][vehicle.getId()] = model.addVar(0,1,0, relax ? GRB.CONTINUOUS : GRB.BINARY,
+                            "x_e_k_i_j_"+vehicle.getEchelon()+"_"+vehicle.getId()+"_"+from.getId()+"_"+finaldepot);
+                    zijk[from.getId()][finaldepot][vehicle.getId()] = model.addVar(0, 0,  0, GRB.CONTINUOUS,
+                            "z_e_k_i_j_"+vehicle.getEchelon()+"_"+vehicle.getId()+"_"+from.getId()+"_"+finaldepot);
+                }
+            }
+        }
+
+        //variables E2
+
+        for (int i = 1; i < inst.getNumNodes()-1-inst.getNumHubs(); i++) {
+
+            Node from = inst.getNodes().get(i);
+
+            for (Vehicle vehicle: inst.getVehicles(2))
+            {
+                for (int j = inst.getNumHubs()+1; j < inst.getNumNodes()-inst.getNumHubs()-1; j++) {
+                    Node to = inst.getNodes().get(j);
+
+                    xijk[from.getId()][to.getId()][vehicle.getId()] = model.addVar(0,1,0, relax ? GRB.CONTINUOUS : GRB.BINARY,
+                            "x_e_k_i_j_"+vehicle.getEchelon()+"_"+vehicle.getId()+"_"+from.getId()+"_"+to.getId());
+                    zijk[from.getId()][to.getId()][vehicle.getId()] = model.addVar(0, vehicle.getCapacity(),  0, GRB.CONTINUOUS,
+                            "z_e_k_i_j_"+vehicle.getEchelon()+"_"+vehicle.getId()+"_"+from.getId()+"_"+to.getId());
+                }
+
+                if (from.getType()==Parameters.NODE_CLIENT)
+                {
+                    for (Hub hub: inst.getHubs())
+                    {
+                        int finalIndex = inst.getFinalNode(hub);
+
+                        xijk[from.getId()][finalIndex][vehicle.getId()] = model.addVar(0,1,0, relax ? GRB.CONTINUOUS : GRB.BINARY,
+                                "x_e_k_i_j_"+vehicle.getEchelon()+"_"+vehicle.getId()+"_"+from.getId()+"_"+finalIndex);
+                        zijk[from.getId()][finalIndex][vehicle.getId()] = model.addVar(0, 0,  0, GRB.CONTINUOUS,
+                                "z_e_k_i_j_"+vehicle.getEchelon()+"_"+vehicle.getId()+"_"+from.getId()+"_"+finalIndex);
+                    }
+                }
+            }
+        }
+
+        for (Vehicle vehicle: inst.getVehicles(1))
+        {
+            int k = vehicle.getId();
+            Fk[k] = model.addVar(0,GRB.INFINITY,0,GRB.INTEGER,"F_k_"+k);
+            for (int i = 0; i < Parameters.INTERVALS; i++) {
+                fke[k][i] = model.addVar(0,i<(Parameters.INTERVALS-1)?Parameters.INTERVALS_BOUNDS[i]:GRB.INFINITY,0,GRB.CONTINUOUS,"f_k_e_"+k+"_"+i);
+            }
+        }
+
+    }
+
+    private void addObjective() throws GRBException
+    {
+        GRBLinExpr obj = new GRBLinExpr();
+
+        for (int i = 0; i < inst.getNumNodes(); i++) {
+            Node n = inst.getNodes().get(i);
+            for (int j = 0; j < inst.getNumNodes(); j++) {
+                if (i == j)
+                    continue;
+                Node n1 = inst.getNodes().get(j);
+                if (n.getType()== Parameters.NODE_CLIENT && n1.getType() == Parameters.NODE_HUB) {
+                    if (wch[n.getClient().getId()][n1.getHub().getId()] != null) {
+                        Client client = n.getClient();
+                        double emission = inst.getDistances()[i][j] <= client.getEmissionProfile()[0] ? Parameters.EMISSIONS_GREEN : Parameters.EMISSIONS_PASS;
+                        if (problemVersion == 1)
+                            emission = 1;
+                        if  (problemVersion == 5)
+                            emission = 0;
+
+                        obj.addTerm( round(emission*inst.getDistances()[i][j],0), wch[n.getClient().getId()][n1.getHub().getId()]);
+                    }
+                } else {
+                    for (int k = 0; k < inst.getNumVehicles(); k++) {
+                        Vehicle vehicle = inst.getVehicles().get(k);
+                        double emissions = vehicle.getEmissions();
+                        if (problemVersion == 1 || problemVersion == 5)
+                            emissions = 1;
+                        if (xijk[i][j][k] != null){
+                            obj.addTerm( round(emissions*inst.getDistances()[i][j],0),xijk[i][j][k]);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (problemVersion != 1 && problemVersion != 5) {
+            //VERSIONE PIECE-WISE
+            for (Vehicle vehicle : inst.getVehicles(1)) {
+                int k = vehicle.getId();
+                for (int i = 0; i < Parameters.INTERVALS; i++) {
+                    obj.addTerm(Parameters.INTERVALS_VALUES[i], fke[k][i]);
+                }
+            }
+        }
+        model.setObjective(obj);
+    }
+
+    private void addConstraintsE1() throws GRBException {
+
+        addDepotFlow(); //constraint 2
+        addOpeningDepot();
+        addSubtourElimination();
+        addHubsFlow(); //constraints 3-4
+        addHubDeliveries(); //constraints 5-6
+        addDepotCapacityFlow(); //constraint 7
+    }
+
+    private void addConstraintsE2() throws GRBException {
+        addClientsFlow(); //constraints 9-10
+        addClientsToHub(); // constraint 11
+        connectClientToHubVehicle(); // constraints 12 - 13 - 14 - 15
+        addHubsFlowE2(); //constraints 16 -17
+        addMaxCapacity(); //constraints 18-22
+        addClientsCapacityFlow(); //constraint 19
+        addConsistencyVehicleHub(); // constraint 20
+        addHubCapacityFlow();  //constraint 21
+    }
+
+    private void addConstraintsPW() throws GRBException {
+        for (Vehicle vehicle: inst.getVehicles(1))
+        {
+            int k = vehicle.getId();
+            GRBLinExpr lhs = new GRBLinExpr();
+            for (int i = 0; i < Parameters.INTERVALS; i++) {
+                if (fke[k][i] != null) {
+                    lhs.addTerm(1, fke[k][i]);
+              
+                }
+            }
+            if (Fk[k] != null)
+                model.addConstr(lhs,GRB.EQUAL,Fk[k],"intervals_k_"+k);
+
+            GRBLinExpr rhs1 = new GRBLinExpr();
+            for (int i = 1; i < inst.getNumNodes(); i++) {
+                for (int j = 0; j < inst.getNumNodes(); j++) {
+                    if (xijk[i][j][k] != null )
+                        rhs1.addTerm(1,xijk[i][j][k]);
+                }
+            }
+            model.addConstr(Fk[k],GRB.EQUAL,rhs1,"numStops_k_"+k);
+        }
+    }
+    private void addSymmetryBreaking() throws GRBException {
+
+        for (int i = 0; i < inst.getVehiclesType(Parameters.VEHICLE_MED_EM).size() - 1; i++) {
+
+            int k = inst.getVehiclesType(Parameters.VEHICLE_MED_EM).get(i).getId();
+            int k1 = inst.getVehiclesType(Parameters.VEHICLE_MED_EM).get(i + 1).getId();
+            GRBLinExpr lhs = new GRBLinExpr();
+            GRBLinExpr rhs = new GRBLinExpr();
+
+            for (Hub hub : inst.getHubs()) {
+                int h = hub.getId();
+                lhs.addTerm(1.0, qkh[k][h]);
+                rhs.addTerm(1.0, qkh[k1][h]);
+            }
+            model.addConstr(lhs, GRB.GREATER_EQUAL, rhs, "Symmetry_k_k1_medEM_" + k + "_" + k1);
+        }
+        for (int i = 0; i < inst.getVehiclesType(Parameters.VEHICLE_MED_ZERO).size() - 1; i++) {
+
+            int k = inst.getVehiclesType(Parameters.VEHICLE_MED_ZERO).get(i).getId();
+            int k1 = inst.getVehiclesType(Parameters.VEHICLE_MED_ZERO).get(i + 1).getId();
+            GRBLinExpr lhs = new GRBLinExpr();
+            GRBLinExpr rhs = new GRBLinExpr();
+
+            for (Hub hub : inst.getHubs()) {
+                int h = hub.getId();
+                lhs.addTerm(1.0, qkh[k][h]);
+                rhs.addTerm(1.0, qkh[k1][h]);
+            }
+            model.addConstr(lhs, GRB.GREATER_EQUAL, rhs, "Symmetry_k_k1_med0_" + k + "_" + k1);
+        }
+        for (int i = 0; i < inst.getVehiclesType(Parameters.VEHICLE_SMALL_ZERO).size() - 1; i++) {
+
+            int k = inst.getVehiclesType(Parameters.VEHICLE_SMALL_ZERO).get(i).getId();
+            int k1 = inst.getVehiclesType(Parameters.VEHICLE_SMALL_ZERO).get(i + 1).getId();
+            GRBLinExpr lhs = new GRBLinExpr();
+            GRBLinExpr rhs = new GRBLinExpr();
+
+            for (Hub hub : inst.getHubs()) {
+                int h = hub.getId();
+                lhs.addTerm(1.0, qkh[k][h]);
+                rhs.addTerm(1.0, qkh[k1][h]);
+            }
+            model.addConstr(lhs, GRB.GREATER_EQUAL, rhs, "Symmetry_k_k1_small_" + k + "_" + k1);
+        }
+
+
+    private void addValidInequalities() throws GRBException{
+
+        GRBLinExpr lhs = new GRBLinExpr();
+        GRBLinExpr rhs = new GRBLinExpr();
+
+        for (Hub hub: inst.getHubs()){
+            lhs.addTerm(hub.getCapacity(),lh[hub.getId()]);
+        }
+        for (Client client: inst.getClients())
+        {
+            rhs.addConstant(client.getDemand());
+        }
+
+        model.addConstr(lhs,GRB.GREATER_EQUAL,rhs, "Global_Capacity_cut");
+
+
+        // vehicle-hub capacity
+
+
+        ArrayList<Client> clientsAtHome = new ArrayList<>();
+        double demand = 0;
+
+        for (Hub hub: inst.getHubs())
+        {
+            GRBLinExpr lhs2 = new GRBLinExpr();
+            GRBLinExpr rhs2 = new GRBLinExpr();
+            int h = hub.getId();
+
+            for (Vehicle vehicle: inst.getVehicles(2))
+            {
+                int k = vehicle.getId();
+
+                if (qkh[k][h] != null)
+                    lhs2.addTerm(vehicle.getCapacity(),qkh[k][h]);
+            }
+
+            for (Client client: inst.getClients())
+            {
+                int c = client.getId();
+                if (ych[c][h] != null)
+                    rhs2.addTerm(client.getDemand(),ych[c][h]);
+            }
+
+            model.addConstr(lhs2,GRB.GREATER_EQUAL,rhs2,"Vehicle_toHub_CapacityCut_h_"+h);
+        }
+        for (Client client: inst.getClients())
+            if (client.getEmissionProfile()[1] == 0) {
+                clientsAtHome.add(client);
+            }
+
+        if (!clientsAtHome.isEmpty())
+        {
+            for (Client client: clientsAtHome)
+                demand += client.getDemand();
+            GRBLinExpr lhs3 = new GRBLinExpr();
+            for (Vehicle vehicle: inst.getVehicles(2))
+            {
+                for (Hub hub: inst.getHubs())
+                {
+                    if (qkh[vehicle.getId()][hub.getId()] != null)
+                        lhs3.addTerm(vehicle.getCapacity(),qkh[vehicle.getId()][hub.getId()]);
+                }
+            }
+            model.addConstr(lhs3,GRB.GREATER_EQUAL,demand,"Subset_atHome_cut");
+        }
+
+        GRBLinExpr rhs1 = new GRBLinExpr();
+        for (Vehicle vehicle: inst.getVehicles(2))
+            for (Hub hub: inst.getHubs())
+            {
+                for (Client client: inst.getClients())
+                    rhs1.addTerm(1,sck[client.getId()][vehicle.getId()]);
+
+                model.addConstr(qkh[vehicle.getId()][hub.getId()],GRB.LESS_EQUAL,rhs1,"constraint_Attivazione_Veicolo_k_h_"+vehicle.getId()+"_"+hub.getId());
+            }
+    }
+
+
+    private void addDepotFlow() throws GRBException {
+        for (Vehicle vehicle: inst.getVehicles(1))
+        {
+            int k = vehicle.getId();
+
+            GRBLinExpr lhs = new GRBLinExpr();
+            GRBLinExpr rhs = new GRBLinExpr();
+            for (Node node: inst.getNodes())
+            {
+                int i = node.getId();
+                if (xijk[0][i][k] != null)
+                    lhs.addTerm(1,xijk[0][i][k]);
+                if (xijk[i][inst.getNumNodes()-1][k] != null)
+                    rhs.addTerm(1,xijk[i][inst.getNumNodes()-1][k]);
+            }
+            model.addConstr(lhs,GRB.EQUAL,rhs,"Depot_flow_k_"+k);
+            model.addConstr(lhs,GRB.LESS_EQUAL,1,"Depot_flow1_k_"+k);
+        }
+    }
+
+    private void addSubtourElimination() throws GRBException {
+        for (Vehicle vehicle: inst.getVehicles(1))
+        {
+            int k = vehicle.getId();
+            GRBLinExpr rhs = new GRBLinExpr();
+            for (Node node: inst.getNodes())
+            {
+                int i = node.getId();
+                if (xijk[0][i][k] != null)
+                    rhs.addTerm(1,xijk[0][i][k]);
+            }
+            for (Node node: inst.getNodes()) {
+                int i = node.getId();
+                for (Node node1 : inst.getNodes()) {
+                    int j = node1.getId();
+
+                    if (xijk[i][j][k] != null)
+                        model.addConstr(xijk[i][j][k], GRB.LESS_EQUAL, rhs, "SubtourElimination_k_i_j_" + k + "_" + i + "_" + j);
+                }
+            }
+        }
+    }
+    private void addOpeningDepot() throws GRBException
+    {
+        for (Node node1: inst.getNodes()) {
+            if (node1.getType() != Parameters.NODE_HUB)
+                continue;
+
+            Hub hub = node1.getHub();
+            int j = node1.getId();
+            int h = hub.getId();
+
+            GRBLinExpr lhs = new GRBLinExpr();
+            for (Vehicle vehicle: inst.getVehicles(1))
+            {
+                int k = vehicle.getId();
+
+                for (Node node: inst.getNodes())
+                {
+                    int i = node.getId();
+
+                    if (xijk[j][i][k] != null) {
+                        lhs.addTerm(1, xijk[j][i][k]);
+                    }
+                }
+            }
+            model.addConstr(lhs,GRB.GREATER_EQUAL,lh[h],"ArcsLeavingHub_h_"+h);
+        }
+        GRBLinExpr maxHubs = new GRBLinExpr();
+        for (Hub hub: inst.getHubs())
+        {
+            int h = hub.getId();
+            maxHubs.addTerm(1,lh[h]);
+
+        }
+        model.addConstr(maxHubs,GRB.LESS_EQUAL,
+            problemVersion!=2?inst.getNumClients()/10.0:inst.getHubs().size(),"Max_hubs");
+    }
+
+    private void addHubsFlow() throws GRBException
+    {
+        for (Node node1: inst.getNodes())
+        {
+            if (node1.getType()!= Parameters.NODE_HUB)
+                continue;
+
+            Hub hub = node1.getHub();
+            int j = node1.getId();
+            int h = hub.getId();
+
+            GRBLinExpr lhs = new GRBLinExpr();
+            GRBLinExpr rhs = new GRBLinExpr();
+
+            for (Vehicle vehicle: inst.getVehicles(1))
+            {
+                int k = vehicle.getId();
+                //                System.out.println("int k: "+ k);
+
+                for (Node node: inst.getNodes())
+                {
+                    int i = node.getId();
+
+                    if (xijk[j][i][k] != null) {
+                        lhs.addTerm(1, xijk[j][i][k]);
+                    }
+                    if (xijk[i][j][k] != null) {
+                        rhs.addTerm(1, xijk[i][j][k]);
+                    }
+                }
+                model.addConstr(lhs,GRB.EQUAL,rhs, "Hub_flow_h_k_"+h+"_"+k);
+            }
+            GRBLinExpr rhs1 = new GRBLinExpr();
+            rhs1.addTerm(inst.getNumVehiclesEchelon(1),lh[h]);
+            model.addConstr(lhs,GRB.LESS_EQUAL,rhs1,"Hub_activation_h_"+h);
+        }
+    }
+
+
+    private void addHubDeliveries() throws GRBException
+    {
+        for (Node node1: inst.getNodes())
+        {
+            if (node1.getType()!= Parameters.NODE_HUB)
+                continue;
+            int j = node1.getId();
+            Hub hub = node1.getHub();
+            int h = hub.getId();
+
+            GRBLinExpr lhs = new GRBLinExpr();
+            for (Client client: inst.getClients())
+            {
+                int c = client.getId();
+
+                if (wch[c][h] != null)
+                    lhs.addTerm(client.getDemand(),wch[c][h]);
+                if (ych[c][h] != null)
+                    lhs.addTerm(client.getDemand(),ych[c][h]);
+            }
+            model.addConstr(lhs,GRB.LESS_EQUAL,hub.getCapacity(), "Hub_maxCapacity_h_"+h);
+
+            GRBLinExpr rhs = new GRBLinExpr();
+
+            for (Vehicle vehicle: inst.getVehicles(1))
+            {
+                int k = vehicle.getId();
+
+                for (Node node : inst.getNodes())
+                {
+                    int i = node.getId();
+
+                    if (zijk[i][j][k] != null)
+                        rhs.addTerm(1,zijk[i][j][k]);
+                    if (zijk[j][i][k] != null)
+                        rhs.addTerm(-1,zijk[j][i][k]);
+
+                }
+            }
+            model.addConstr(lhs,GRB.EQUAL,rhs,"Hub_CapacityDelivery_h_"+h);
+        }
+    }
+
+
+    private void addDepotCapacityFlow() throws GRBException
+    {
+        GRBLinExpr lhs = new GRBLinExpr();
+        GRBLinExpr rhs = new GRBLinExpr();
+        for (Vehicle vehicle: inst.getVehicles(1))
+        {
+            int k = vehicle.getId();
+            for (Node node : inst.getNodes())
+            {
+                int i = node.getId();
+
+                if (zijk[i][0][k] != null)
+                    lhs.addTerm(1,zijk[i][0][k]);
+                if (zijk[0][i][k] != null)
+                    lhs.addTerm(-1,zijk[0][i][k]);
+
+            }
+        }
+        for (Hub hub: inst.getHubs())
+        {
+            int h = hub.getId();
+            for (Client client: inst.getClients())
+            {
+                int c = client.getId();
+
+                if (wch[c][h] != null)
+                    rhs.addTerm(-client.getDemand(),wch[c][h]);
+                if (ych[c][h] != null)
+                    rhs.addTerm(-client.getDemand(),ych[c][h]);
+            }
+        }
+
+        model.addConstr(lhs,GRB.EQUAL,rhs,"Depot_capacityFlow");
+    }
+
+    // constraints 9 - 10
+    // for c in C: x_cik = x_ick = 1-w_ch
+    // w_ch + y_ch = 1
+    private void addClientsFlow() throws GRBException {
+        for (Node node1: inst.getNodes())
+        {
+            if (node1.getType() != Parameters.NODE_CLIENT)
+                continue;
+            int j = node1.getId();
+
+            Client client = node1.getClient();
+            int c = client.getId();
+            GRBLinExpr lhs = new GRBLinExpr();
+            GRBLinExpr rhs = new GRBLinExpr();
+            GRBLinExpr rhs1 = new GRBLinExpr();
+            GRBLinExpr rhs2 = new GRBLinExpr();
+            for (Hub hub: inst.getHubs())
+            {
+                int h = hub.getId();
+                if (wch[c][h] != null) {
+                    rhs1.addTerm(-1, wch[c][h]);
+                    rhs2.addTerm(1,wch[c][h]);
+                }
+                if (ych[c][h] != null)
+                    rhs2.addTerm(1,ych[c][h]);
+
+            }
+            rhs1.addConstant(1);
+
+            for (Node node: inst.getNodes())
+            {
+                int i = node.getId();
+
+                for (Vehicle vehicle: inst.getVehicles(2))
+                {
+                    int k = vehicle.getId();
+
+                    if (xijk[j][i][k] != null)
+                        lhs.addTerm(1,xijk[j][i][k]);
+                    if (xijk[i][j][k] != null)
+                        rhs.addTerm(1,xijk[i][j][k]);
+                }
+            }
+            model.addConstr(lhs,GRB.EQUAL,rhs, "Client_flow_c_"+c);
+            model.addConstr(lhs, GRB.EQUAL,rhs1, "Client_flow_home_c_"+c);
+            model.addConstr(rhs2,GRB.EQUAL,1,"Client_assignment_c_"+c);
+
+        }
+    }
+
+    //constraint 11
+    // for c in C: y_ch + w_ch <= l_h
+    private void addClientsToHub() throws GRBException {
+        for (Client client: inst.getClients())
+        {
+            int c = client.getId();
+            GRBLinExpr lhs = new GRBLinExpr();
+            for (Hub hub:inst.getHubs())
+            {
+                int h = hub.getId();
+                GRBLinExpr lhs1 = new GRBLinExpr();
+
+                if (ych[c][h] != null){
+                    lhs.addTerm(1,ych[c][h]);
+                    lhs1.addTerm(1,ych[c][h]);
+                }
+                if (wch[c][h] != null){
+                    lhs.addTerm(1,wch[c][h]);
+                    lhs1.addTerm(1,wch[c][h]);
+                }
+
+                if (lh[h] != null)
+                    model.addConstr(lhs1, GRB.LESS_EQUAL, lh[h], "Client_to_hub_c_h_" + c + "_" + h);
+            }
+
+        }
+    }
+    // constraint 19
+    // for c in C , for k in K^2 : z_ick - z_cik = sum_ h D_c*s_ckh
+    private void addClientsCapacityFlow() throws GRBException
+    {
+        for (Node node1 : inst.getNodes())
+        {
+            if (node1.getType() != Parameters.NODE_CLIENT)
+                continue;
+            int j = node1.getId();
+            int c = node1.getClient().getId();
+
+            for (Vehicle vehicle: inst.getVehicles(2))
+            {
+                int k = vehicle.getId();
+
+                GRBLinExpr lhs = new GRBLinExpr();
+                GRBLinExpr rhs = new GRBLinExpr();
+
+                rhs.addTerm(node1.getClient().getDemand(), sck[c][k]);
+
+
+                for (Node node: inst.getNodes())
+                {
+                    int i = node.getId();
+                    if (zijk[i][j][k] != null)
+                        lhs.addTerm(1,zijk[i][j][k]);
+                    if (zijk[j][i][k] != null)
+                        lhs.addTerm(-1,zijk[j][i][k]);
+                }
+
+                model.addConstr(lhs,GRB.EQUAL,rhs,"Client_capacityFlow_c_k_"+c+"_"+k);
+                //                model.addConstr(lhs,GRB.EQUAL,client.getDemand(),"Client_capacityFlow_c_k_"+c+"_"+k);
+            }
+        }
+    }
+
+
+    private void addHubsFlowE2() throws GRBException
+    {
+        for (Node node1: inst.getNodes())
+        {
+            if (node1.getType()!= Parameters.NODE_HUB)
+                continue;
+
+            Hub hub = node1.getHub();
+            int j = node1.getId();
+            int z = inst.getFinalNode(hub);
+            int h = hub.getId();
+            for (Vehicle vehicle: inst.getVehicles(2))
+            {
+                int k = vehicle.getId();
+                //                System.out.println("int k: "+ k);
+                GRBLinExpr lhs = new GRBLinExpr();
+                GRBLinExpr rhs = new GRBLinExpr();
+
+                for (Node node: inst.getNodes())
+                {
+                    int i = node.getId();
+
+                    if (xijk[j][i][k] != null) {
+                        lhs.addTerm(1, xijk[j][i][k]);
+                    }
+                    if (xijk[i][z][k] != null) {
+                        rhs.addTerm(1, xijk[i][z][k]);
+                    }
+                }
+                model.addConstr(lhs,GRB.EQUAL,rhs, "Hub_flow_E2_h_k_"+h+"_"+k);
+                model.addConstr(lhs,GRB.LESS_EQUAL,qkh[k][h],"Hub_flow1_E2_h_k_"+h+"_"+k);
+                model.addConstr(qkh[k][h], GRB.LESS_EQUAL,lh[h],"Vehicle_toOpen_Hub_k_h_"+k+"_"+h);
+            }
+        }
+    }
+
+
+    private void connectClientToHubVehicle() throws GRBException {
+
+        for (Client client: inst.getClients())
+        {
+            int c = client.getId();
+
+            GRBLinExpr lhs = new GRBLinExpr();
+            GRBLinExpr rhs = new GRBLinExpr();
+            for (Vehicle vehicle: inst.getVehicles()) {
+                int k = vehicle.getId();
+                if (sck[c][k] != null)
+                    lhs.addTerm(1, sck[c][k]);
+
+                for (Hub hub: inst.getHubs()) {
+                    int h = hub.getId();
+
+                    GRBLinExpr rhs1= new GRBLinExpr();
+                    GRBLinExpr rhs2 = new GRBLinExpr();
+                    rhs1.addConstant(1);
+                    rhs2.addConstant(1);
+                    if (sck[c][k] != null) {
+                        if (qkh[k][h] != null && ych[c][h] != null) {
+                            rhs1.addTerm(1,qkh[k][h]);
+                            rhs2.addTerm(-1,qkh[k][h]);
+                            rhs1.addTerm(-1,ych[c][h]);
+                            rhs2.addTerm(1,ych[c][h]);
+                            model.addConstr(sck[c][k], GRB.LESS_EQUAL, rhs1,
+                                    "Connect_client_hub_vehicle_c_h_k_1_" + c + "_" + h + "_" + k);
+                            model.addConstr(sck[c][k], GRB.LESS_EQUAL, rhs2,
+                                    "Connect_client_hub_vehicle_c_h_k_2_" + c + "_" + h + "_" + k);
+
+                        }
+                    }
+                }
+            }
+            for (Hub hub:inst.getHubs())
+            {
+                int h = hub.getId();
+                if (ych[c][h] != null)
+                    rhs.addTerm(1, ych[c][h]);
+            }
+            model.addConstr(lhs,GRB.EQUAL,rhs,"Client_OnlyOneVehicle_c_"+c);
+        }
+    }
+    //constraint 20
+    // for c in C, k in K, h in H : x_cik + x_zik -sch^k <= 1
+    private void addConsistencyVehicleHub() throws GRBException {
+        for (Node node1: inst.getNodes())
+        {
+            if (node1.getType() != Parameters.NODE_CLIENT)
+                continue;
+            int j = node1.getId();
+            Client client = node1.getClient();
+            int c = client.getId();
+            for (Vehicle vehicle: inst.getVehicles())
+            {
+                int k = vehicle.getId();
+
+                for (Node node2: inst.getNodes())
+                {
+                    if (node2.getType() != Parameters.NODE_HUB)
+                        continue;
+                    int z = node2.getId();
+                    Hub hub = node2.getHub();
+                    int h = hub.getId();
+
+                    GRBLinExpr lhs = new GRBLinExpr();
+
+                    for (Node node: inst.getNodes())
+                    {
+                        int i = node.getId();
+
+                        if (xijk[j][i][k] != null)
+                            lhs.addTerm(1,xijk[j][i][k]);
+                        if (xijk[z][i][k] != null)
+                            lhs.addTerm(1,xijk[z][i][k]);
+                    }
+        
+                    if (sck[c][k] != null)
+                        lhs.addTerm(-1,sck[c][k]);
+
+                    model.addConstr(lhs,GRB.LESS_EQUAL,1,"Vehicle_hub_consistency_k_h_c_"+k+"_"+h+"_"+c);
+                }
+            }
+        }
+    }
+
+
+
+    private void addHubCapacityFlow() throws GRBException
+    {
+        for (Node node1: inst.getNodes())
+        {
+            if (node1.getType() != Parameters.NODE_HUB)
+                continue;
+
+            int j = node1.getId();
+            Hub hub = node1.getHub();
+            int h = hub.getId();
+            int finalID = inst.getFinalNode(hub);
+
+            GRBLinExpr lhs = new GRBLinExpr();
+            GRBLinExpr rhs = new GRBLinExpr();
+
+            for (Node node2: inst.getNodes())
+            {
+                if (node2.getType() != Parameters.NODE_CLIENT)
+                    continue;
+
+                int i = node2.getId();
+                Client client = node2.getClient();
+                int c = client.getId();
+
+                for (Vehicle vehicle: inst.getVehicles(2))
+                {
+                    int k = vehicle.getId();
+
+                    if (zijk[i][finalID][k] != null && zijk[j][i][k] != null) {
+                        //                        lhs.addTerm(1, zijk[i][finalID][k]);
+                        lhs.addTerm(1,zijk[j][i][k]);
+                    }
+                }
+                rhs.addTerm(client.getDemand(),ych[c][h]);
+            }
+            model.addConstr(lhs,GRB.EQUAL,rhs,"Hub_capacityFlow_"+h);
+        }
+    }
+
+    private void addMaxCapacity() throws GRBException {
+        for (Vehicle vehicle: inst.getVehicles())
+        {
+            int k = vehicle.getId();
+            GRBLinExpr lhs = new GRBLinExpr();
+            for (Node node: inst.getNodes())
+            {
+                int i = node.getId();
+
+                for (Node node1: inst.getNodes())
+                {
+                    int j = node1.getId();
+                    GRBLinExpr rhs = new GRBLinExpr();
+
+                    if (xijk[i][j][k] != null && zijk[i][j][k] != null){
+                        rhs.addTerm(vehicle.getCapacity(), xijk[i][j][k]);
+                        model.addConstr(zijk[i][j][k],GRB.LESS_EQUAL,rhs,
+                                "Vehicle_maxCapacity_k_i_j_"+k+"_"+i+"_"+j);
+                    }
+                }
+            }
+
+            for (Hub hub: inst.getHubs())
+            {
+                int h = hub.getId();
+                if (qkh[k][h] != null)
+                    lhs.addTerm(1,qkh[k][h]);
+            }
+            if (vehicle.getEchelon() == 2)
+                model.addConstr(lhs,GRB.LESS_EQUAL,1,"Vehicle_oneHub_k_"+k);
+        }
+    }
+
+
+    public void dispose()
+    {
+        model.dispose();
+    }
+
+    private double round(double value, int decimals) {
+        double scale = Math.pow(10, decimals);
+        return Math.round(value * scale) / scale;
+    }
+
+    public GRBVar[][][] getXij()
+    {
+        return xijk;
+    }
+    public GRBVar[][] getSck()
+    {
+        return sck;
+    }
+
+    public GRBVar[][] getQkh() {
+        return qkh;
+    }
+
+    public void setQkh(GRBVar[][] qkh) {
+        this.qkh = qkh;
+    }
+
+    public boolean isCallback() {
+        return callback;
+    }
+
+    public void setCallback(boolean callback) {
+        this.callback = callback;
+    }
+
+    public int getproblemVersion() {
+        return problemVersion;
+    }
+
+    public void setproblemVersion(int problemVersion) {
+        this.problemVersion = problemVersion;
+    }
+
+    public boolean isHasSolution() {
+        return hasSolution;
+    }
+
+    public double getCost() {
+        return cost;
+    }
+
+    public void setCost(double cost) {
+        this.cost = cost;
+    }
+
+    public void setHasSolution(boolean hasSolution) {
+        this.hasSolution = hasSolution;
+    }
+
+    public void read(File sol) throws IOException, GRBException {
+        model.read(sol.getCanonicalPath());
+    }
+}
+
+
+
+
