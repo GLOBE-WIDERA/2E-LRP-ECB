@@ -1,0 +1,43 @@
+package main;
+
+public class Parameters {
+
+    public static final int NODE_DEPOT = 0;
+    public static final int NODE_HUB = 1;
+    public static final int NODE_HUB_FINAL = 3;
+    public static final int NODE_CLIENT = 2;
+
+    public static final int VEHICLE_BIG = 0;
+    public static final int VEHICLE_MED_EM = 1;
+    public static final int VEHICLE_MED_ZERO = 2;
+    public static final int VEHICLE_SMALL_ZERO = 3;
+
+    public static final int decimalDigits = 3;
+    public static final double eps = 1e-3;
+    public static final int AREA_WIDTH = 100;
+    public static final int AREA_HEIGHT = 100;
+    public static final double EDGE = 15.0;
+    public static final double EMPTY_R = 1;
+
+    public static final double FCR_HEAVY = 0.5;
+    public static final double FCR_LIGHT = 0.3;
+ //emissioni g/km
+
+    public static final int SCALE = 100;
+    public static final int EMISSIONS_HEAVY_M = (int)Math.round(0.38 * SCALE);  // 38
+    public static final int EMISSIONS_LIGHT   = (int)Math.round(0.30 * SCALE);  // 30
+    public static final int EMISSIONS_PASS    = (int)Math.round(0.15 * SCALE);  // 15
+    public static final int EMISSIONS_GREEN   = (int)Math.round(0.05 * SCALE);  //  5
+
+
+    public static final int INTERVALS = 3;
+    public static final int[] INTERVALS_BOUNDS = new int[]{2,3,5};
+    public static final int[] INTERVALS_VALUES = new int[]{
+            (int)Math.round(0.1  * SCALE),  // 10
+            (int)Math.round(0.15 * SCALE),  // 15
+            (int)Math.round(0.3  * SCALE)   // 30
+    };
+
+    public static final int KM = 1000;
+    public static final int DIST = 1;
+}
