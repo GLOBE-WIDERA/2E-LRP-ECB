@@ -1,0 +1,313 @@
+package instance;
+
+import elements.Client;
+import elements.Hub;
+import elements.Node;
+import elements.Vehicle;
+import it.unimi.dsi.fastutil.ints.IntArrayList;
+import it.unimi.dsi.fastutil.ints.IntList;
+import main.Parameters;
+
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.List;
+
+public class Instance {
+
+    private String name;
+
+    private double[] depotPosition;
+    private int numClients;
+    private int numHubs;
+    private int numVehicles;
+
+    private List<Client> clientList;
+    private List<Vehicle> vehicleList;
+    private List<Hub> hubList;
+
+    private List<Node> nodeList;
+
+    private IntList clientsId;
+    private IntList hubsId;
+    private IntList hubsFinalId;
+    private int[][] travelTimes;
+    private double[][] distances;
+    private double[][] normalizedTravelTimes;
+
+    private int problemVersion;
+
+
+
+    public Instance(String name, double[] depotPosition, int numClients, int numHubs, int numVehicles,
+                    List<Client> clientList, List<Vehicle> vehicleList, List<Hub> hubList, List<Node> nodeList) {
+        this.name = name;
+        this.depotPosition = depotPosition;
+        this.numClients = numClients;
+        this.numHubs = numHubs;
+        this.numVehicles = numVehicles;
+        this.clientList = clientList;
+        this.vehicleList = vehicleList;
+        this.hubList = hubList;
+        this.nodeList = nodeList;
+
+
+        createIDLists();
+        computeDistance();
+        computeHubsPerClient();
+    }
+
+    public void setAllVehiclesHomog()
+    {
+        for (Vehicle vehicle: vehicleList)
+        {
+            if (vehicle.getEchelon() == 1)
+                continue;
+            vehicle.setEmissions(1);
+        }
+    }
+
+    private void computeHubsPerClient()
+    {
+        for (Node node: nodeList)
+        {
+            if (node.getType() != Parameters.NODE_CLIENT)
+                continue;
+
+            Client client = node.getClient();
+
+            List<Hub> availableHubs = new ArrayList<>();
+            for (Node node1: nodeList)
+            {
+                if (node1.getType() != Parameters.NODE_HUB || distances[node.getId()][node1.getId()] > client.getEmissionProfile()[1])
+                    continue;
+
+                Hub hub = node1.getHub();
+                availableHubs.add(hub);
+
+            }
+            client.setAvailableHubs(availableHubs);
+        }
+    }
+
+    public int getFinalNode(Hub hub)
+    {
+        for (Node node: nodeList)
+        {
+            if (node.getType() == Parameters.NODE_HUB_FINAL && node.getHub().equals(hub)) {
+                return node.getId();
+            }
+        }
+        return -1;
+    }
+
+    public int getFinalNodeVehicle(int k)
+    {
+        Vehicle vehicle = vehicleList.get(k);
+        int hubId = vehicle.getHubId();
+        for (Node node: nodeList)
+        {
+            if (node.getType()!= Parameters.NODE_HUB_FINAL)
+                continue;
+            if (node.getHub().getId() == hubId)
+                return node.getId();
+        }
+        return -1;
+    }
+
+
+    public int getNumNodes()
+    {
+        return nodeList.size();
+    }
+
+    public List<Vehicle> getVehicles(int i)
+    {
+        return vehicleList.stream().filter(v->v.getEchelon() == i).toList();
+    }
+    public List<Vehicle> getVehiclesType(int i)
+    {
+        return vehicleList.stream().filter(v->v.getType() == i).toList();
+    }
+
+    public int getNumVehiclesEchelon(int i) {
+        return
+                (int) vehicleList.stream().filter(v -> v.getEchelon() == i).count();
+    }
+
+    public Node getNodeClient(int c)
+    {
+        for (Node node: nodeList)
+        {
+            if (node.getType()==Parameters.NODE_CLIENT && node.getClient().getId()==c)
+                return node;
+        }
+        return null;
+    }
+    public Node getNodeHub(int h)
+    {
+        for (Node node: nodeList)
+        {
+            if (node.getType()==Parameters.NODE_HUB && node.getHub().getId()==h)
+                return node;
+        }
+        return null;
+    }
+    public Hub getHubVehicle(int vehicleID) {
+        return vehicleList.stream()
+                .filter(v -> v.getId() == vehicleID)
+                .findFirst()
+                .map(v -> hubList.get(v.getHubId()))
+                .orElse(null);
+    }
+
+    private void createIDLists()
+    {
+        clientsId = new IntArrayList();
+        hubsId = new IntArrayList();
+
+        for (Node n: nodeList)
+        {
+            if (n.getType() == Parameters.NODE_CLIENT)
+                clientsId.add(n.getId());
+            if (n.getType() == Parameters.NODE_HUB)
+                hubsId.add(n.getId());
+        }
+    }
+
+
+    private void computeDistance()
+    {
+        distances = new double[getNumNodes()][getNumNodes()];
+
+        for (int i = 0; i < nodeList.size(); i++) {
+
+            Node node1 = nodeList.get(i);
+
+            for (int j = i+1; j < nodeList.size(); j++) {
+
+                Node node2 = nodeList.get(j);
+
+                distances[node1.getId()][node2.getId()] = distances[node2.getId()][node1.getId()] = computeDistance(node1.getLocation(), node2.getLocation());
+
+            }
+        }
+        distances= FloydWarshall.triangularize(distances);
+    }
+
+    public double computeDistance(double[] pos1, double[] pos2){
+
+       double deltaY = 111*(pos1[1]-pos2[1]);
+       double deltaX = 111*Math.cos(Math.toRadians(pos1[1]+pos2[1])/2)*(pos1[0]-pos2[0]);
+        return Parameters.DIST*Parameters.KM*Math.floor(Math.sqrt(Math.pow(deltaX, 2) + Math.pow(deltaY, 2))
+                * Math.pow(10, Parameters.decimalDigits)) / Math.pow(10, Parameters.decimalDigits);
+    }
+    public double getFCR(Vehicle vehicle)
+    {
+        return (vehicle.getType()==Parameters.VEHICLE_BIG?Parameters.FCR_HEAVY:Parameters.FCR_LIGHT)/vehicle.getCapacity();
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public void setName(String name) {
+        this.name = name;
+    }
+
+    public double[] getDepotPosition() {
+        return depotPosition;
+    }
+
+    public void setDepotPosition(double[] depotPosition) {
+        this.depotPosition = depotPosition;
+    }
+
+    public int getNumClients() {
+        return numClients;
+    }
+
+    public void setNumClients(int numClients) {
+        this.numClients = numClients;
+    }
+
+    public int getNumHubs() {
+        return numHubs;
+    }
+
+    public void setNumHubs(int numHubs) {
+        this.numHubs = numHubs;
+    }
+
+    public int getNumVehicles() {
+        return numVehicles;
+    }
+
+    public void setNumVehicles(int numVehicles) {
+        this.numVehicles = numVehicles;
+    }
+
+    public List<Client> getClients() {
+        return clientList;
+    }
+
+    public void setClients(List<Client> clientList) {
+        this.clientList = clientList;
+    }
+
+    public List<Vehicle> getVehicles() {
+        return vehicleList;
+    }
+
+    public void setVehicles(List<Vehicle> vehicleList) {
+        this.vehicleList = vehicleList;
+    }
+
+    public List<Hub> getHubs() {
+        return hubList;
+    }
+
+    public void setHubs(List<Hub> hubList) {
+        this.hubList = hubList;
+    }
+
+    public List<Node> getNodes() {
+        return nodeList;
+    }
+
+    public void setNodeList(List<Node> nodeList) {
+        this.nodeList = nodeList;
+    }
+
+    public IntList getClientsId() {
+        return clientsId;
+    }
+
+    public void setClientsId(IntList clientsId) {
+        this.clientsId = clientsId;
+    }
+
+    public IntList getHubsId() {
+        return hubsId;
+    }
+
+    public void setHubsId(IntList hubsId) {
+        this.hubsId = hubsId;
+    }
+
+    public double[][] getDistances() {
+        return distances;
+    }
+
+    public void setDistances(double[][] distances) {
+        this.distances = distances;
+    }
+
+    public int getProblemVersion() {
+        return problemVersion;
+    }
+
+    public void setProblemVersion(int problemVersion) {
+        this.problemVersion = problemVersion;
+    }
+
+}
