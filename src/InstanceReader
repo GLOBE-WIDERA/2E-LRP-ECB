@@ -1,0 +1,181 @@
+package instance;
+
+import elements.Client;
+import elements.Hub;
+import elements.Node;
+import elements.Vehicle;
+import main.Parameters;
+
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Paths;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.stream.Collectors;
+
+public class InstanceReader_v1 {
+
+
+    public static Instance read(String path, boolean expl, int version) {
+        List<String> lines = null;
+
+        try (BufferedReader br = Files.newBufferedReader(Paths.get(path))) {
+            lines = br.lines().collect(Collectors.toList());
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+
+        String[] pathSplit;
+        String fileNameWithExt = path.substring(
+                path.lastIndexOf(File.separator) + 1
+        );
+
+        String baseName = fileNameWithExt;
+        int dotIndex = fileNameWithExt.lastIndexOf('.');
+        if (dotIndex > 0) {
+            baseName = fileNameWithExt.substring(0, dotIndex);
+        }
+
+        String name = baseName;
+
+        double depotX = Double.parseDouble(lines.get(1).trim().split("\\s+")[2]);
+        double depotY = Double.parseDouble(lines.get(1).trim().split("\\s+")[3]);
+        double[] depotLocation = new double[]{depotX, depotY};
+
+        int numClients = Integer.parseInt(lines.get(2).trim().split("\\s+")[1]);
+        int numHubs = Integer.parseInt(lines.get(3).trim().split("\\s+")[1]);
+
+        int[] numVehicles = {Integer.parseInt(lines.get(4).trim().split("\\s+")[1]),
+                Integer.parseInt(lines.get(4).trim().split("\\s+")[2]),Integer.parseInt(lines.get(4).trim().split("\\s+")[3])};
+
+        int[] capacities = {Integer.parseInt(lines.get(5).trim().split("\\s+")[1]),
+                Integer.parseInt(lines.get(5).trim().split("\\s+")[2]),Integer.parseInt(lines.get(5).trim().split("\\s+")[3])};
+
+        String name1 = name.replace("_"+numClients,"_"+numClients+"_"+numHubs);
+        List<Client> clientList = new ArrayList<>();
+        List<Hub> hubList = new ArrayList<>();
+        List<Vehicle> vehicleList = new ArrayList<>();
+        List<Node> nodes = new ArrayList<>();
+
+        nodes.add(new Node(0, depotLocation, Parameters.NODE_DEPOT));
+        //VEICOLI Big
+
+        int nodeId = 1;
+        int totalDemand = 0;
+        int hubCap =0;
+        for (var line : lines) {
+            int indexLine = lines.indexOf(line);
+
+            if (line.contains("CLIENTS LIST")) {
+                for (int i = 0; i < numClients; i++) {
+                    String[] currentLine = lines.get(indexLine + 2 + i).trim().split("\\s+");
+
+                    int id = Integer.parseInt(currentLine[0]);
+                    int demand = Integer.parseInt(currentLine[1]);
+                    double x = Double.parseDouble(currentLine[2]);
+                    double y = Double.parseDouble(currentLine[3]);
+                    double dMin = Double.parseDouble(currentLine[4]);
+                    double dMax = Double.parseDouble(currentLine[5]);
+                    totalDemand += demand;
+                    Client client = new Client(id, demand, new double[]{x, y}, new double[]{dMin, dMax});
+                    clientList.add(client);
+                    Node node = new Node(nodeId, new double[]{x, y}, Parameters.NODE_CLIENT);
+                    node.setClient(client);
+                    nodes.add(node);
+                    nodeId++;
+                }
+            }
+
+            if (line.contains("HUBS LIST")) {
+                for (int i = 0; i < numHubs; i++) {
+                    String[] currentLine = lines.get(indexLine + 2 + i).trim().split("\\s+");
+
+                    int id = Integer.parseInt(currentLine[0]);
+                    int capacity = Integer.parseInt(currentLine[1]);
+                   hubCap = capacity;
+                    double x = Double.parseDouble(currentLine[2]);
+                    double y = Double.parseDouble(currentLine[3]);
+
+
+                    Hub hub = new Hub(id, new double[]{x, y}, capacity);
+                    hubList.add(hub);
+
+                    Node node = new Node(nodeId, new double[]{x, y}, Parameters.NODE_HUB);
+                    nodeId ++;
+                    node.setHub(hub);
+                    nodes.add(node);
+                    if (expl) {
+                        Node node1 = new Node(nodeId, new double[]{x, y}, Parameters.NODE_HUB_FINAL);
+                        node1.setHub(hub);
+                        nodes.add(node1);
+                        nodeId++;
+                    }
+                }
+
+            }
+        }
+
+
+        nodes.add(new Node(nodes.size(), depotLocation, Parameters.NODE_DEPOT));
+        List<Node> finalNodes = new ArrayList<>();
+        finalNodes.add(nodes.getFirst());
+        int id = 1;
+
+        for (Node node: nodes)
+        {
+            if (node.getType()==Parameters.NODE_HUB) {
+                node.setId(id);
+                finalNodes.add(node);
+                id++;
+            }
+        }
+        for (Node node: nodes)
+        {
+            if (node.getType() == Parameters.NODE_CLIENT)
+            {
+                node.setId(id);
+                finalNodes.add(node);
+                id++;
+            }
+        }
+        for (Node node: nodes)
+        {
+            if (node.getType() == Parameters.NODE_HUB_FINAL)
+            {
+                node.setId(id);
+                finalNodes.add(node);
+                id++;
+            }
+        }
+
+        int vehicleId = 0;
+        for (int i = 0; i < numVehicles[0]; i++) {
+            Vehicle vehicle = new Vehicle(vehicleId,capacities[0], 1,Parameters.EMISSIONS_HEAVY_M,-1,Parameters.VEHICLE_BIG);
+            vehicleId++;
+            vehicleList.add(vehicle);
+        }
+
+        int vehiclesMedEm = version != 2? numVehicles[1]: (int) Math.floor(totalDemand/(double) hubCap);
+        if (vehiclesMedEm < 1)
+            vehiclesMedEm = 1;
+
+        for (int j = 0; j < vehiclesMedEm; j++) {
+            Vehicle vehicle = new Vehicle(vehicleId,capacities[1],2,Parameters.EMISSIONS_LIGHT,-1,Parameters.VEHICLE_MED_EM);
+            vehicleList.add(vehicle);
+            vehicleId++;
+        }
+
+        int smallZero = numVehicles[2];
+        for (int j = 0; j <smallZero; j++) {
+            Vehicle vehicle = new Vehicle(vehicleId,capacities[2], 2,Parameters.EMISSIONS_GREEN,-1,Parameters.VEHICLE_SMALL_ZERO);
+            vehicleList.add(vehicle);
+            vehicleId++;
+        }
+        finalNodes.add(nodes.getLast());
+        int nbVehicles = numVehicles[0]+vehiclesMedEm+smallZero;
+        return new Instance(name, depotLocation, numClients, numHubs, nbVehicles, clientList, vehicleList, hubList, finalNodes);
+    }
+
+}
