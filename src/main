@@ -1,0 +1,47 @@
+package main;
+
+import com.gurobi.gurobi.GRBException;
+import elements.Node;
+import elements.Vehicle;
+import instance.Instance;
+import instance.InstanceReader_v1;
+import elements.*;
+import model.Model2ELRP_2I_pw;
+
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.PrintStream;
+import java.util.Arrays;
+import java.util.Locale;
+
+public class Main {
+
+    public static void main(String[] args) throws IOException, GRBException {
+        Locale.setDefault(Locale.US);
+        String dir = "."+File.separator;
+        File folder = new File("." + File.separator + "Instances");
+
+        File[] instances = folder.listFiles();
+        int[] version = {0}; 
+        //change version to change objective function (0 - EMISSION_HIGH_CAP; 1 - DISTANCES; 2 - NO_AT_HOME; 4 - EMISSIONS_LOW_CAP; 5 - NO CLIENTS)
+
+        for (File f : instances) {
+            for (int v : version) {
+                Instance inst = InstanceReader_v1.read(f.getCanonicalPath(), true,v);
+                if (v == 4) {
+                    for (Vehicle vehicle : inst.getVehicles(2))
+                        if (vehicle.getType() == Parameters.VEHICLE_SMALL_ZERO)
+                            vehicle.setCapacity(vehicle.getCapacity() / 2);
+                }
+                
+                Model2ELRP_2I_pw model = new Model2ELRP_2I_pw(inst, (3600+7200), false);
+                model.setproblemVersion(v);
+                model.buildModel(null);
+                model.solve();
+                model.dispose();
+            }
+        }
+    }
+}
+}
